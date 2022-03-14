@@ -140,7 +140,7 @@ class OSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 删除文件夹
+     * 删除对象
      * @param string $path
      */
     public function delete(string $path): void
@@ -150,8 +150,6 @@ class OSSAdapter implements FilesystemAdapter
             $this->getClient()->deleteObject($this->getBucket(), $prefixedPath);
         } catch (OssException $exception) {
             throw UnableToDeleteFile::atLocation($path, $exception->getErrorMessage(), $exception);
-        } catch (\Throwable $exception) {
-            throw UnableToDeleteFile::atLocation($path, '', $exception);
         }
     }
 
@@ -169,7 +167,7 @@ class OSSAdapter implements FilesystemAdapter
     {
         $dirname = $this->prefixer->prefixPath($path);
         try {
-            $this->getClient()->putObject($this->getBucket(), $dirname . '/', '');
+            $this->getClient()->createObjectDir($this->getBucket(), $dirname);
         } catch (OssException $e) {
             UnableToCreateDirectory::atLocation($path, $e->getMessage());
         }
@@ -348,10 +346,10 @@ class OSSAdapter implements FilesystemAdapter
             return null;
         }
         return new FileAttributes($path,
-            isset($meta['content-length'][0]) ? \intval($meta['content-length'][0]) : null,
+            isset($meta['content-length']) ? \intval($meta['content-length']) : null,
             null,
-            isset($meta['last-modified'][0]) ? \strtotime($meta['last-modified'][0]) : null,
-            $meta['content-type'][0] ?? null,
+            isset($meta['last-modified']) ? \strtotime($meta['last-modified']) : null,
+            $meta['content-type'] ?? null,
         );
     }
 
