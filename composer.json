@@ -13,12 +13,12 @@
     },
     "autoload": {
         "psr-4": {
-            "Larva\\Flysystem\\Cos\\": "src"
+            "Larva\\Flysystem\\Oss\\": "src"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "Larva\\Flysystem\\Cos\\Tests\\": "tests"
+            "Larva\\Flysystem\\Oss\\Tests\\": "tests"
         }
     },
     "license": "MIT",
