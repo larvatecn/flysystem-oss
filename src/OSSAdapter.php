@@ -7,6 +7,7 @@
 
 namespace Larva\Flysystem\Oss;
 
+use Carbon\Carbon;
 use League\Flysystem\Config;
 use League\Flysystem\DirectoryAttributes;
 use League\Flysystem\FileAttributes;
@@ -134,9 +135,20 @@ class OSSAdapter implements FilesystemAdapter
         return $contents;
     }
 
+    /**
+     * 读取流
+     * @param string $path
+     * @return false|resource|string
+     */
     public function readStream(string $path)
     {
-        // TODO: Implement readStream() method.
+        if ( ! $data = $this->read($path)) {
+            return false;
+        }
+        $stream = fopen('php://temp', 'w+b');
+        fwrite($stream, $data);
+        rewind($stream);
+        return $stream;
     }
 
     /**
@@ -205,6 +217,11 @@ class OSSAdapter implements FilesystemAdapter
         }
     }
 
+    /**
+     * 获取访问策略
+     * @param string $path
+     * @return FileAttributes
+     */
     public function visibility(string $path): FileAttributes
     {
         try {
@@ -261,6 +278,42 @@ class OSSAdapter implements FilesystemAdapter
         }
 
         return $meta;
+    }
+
+    /**
+     * 获取对象访问 Url
+     * @param string $path
+     * @return string
+     * @throws OssException
+     */
+    public function getUrl(string $path): string
+    {
+        $location = $this->prefixer->prefixPath($path);
+        if (isset($this->config['url']) && !empty($this->config['url'])) {
+            return $this->config['url'] . '/' . ltrim($location, '/');
+        } else {
+            $visibility = $this->visibility($path);
+            if ($visibility && $visibility['visibility'] == 'private') {
+                return $this->getTemporaryUrl($path, Carbon::now()->addMinutes(5), []);
+            }
+            $scheme = $this->config['ssl'] ? 'https://' : 'http://';
+            return $scheme . $this->getBucket() . '.' . $this->config['endpoint'] . '/' . ltrim($location, '/');
+        }
+    }
+
+    /**
+     * 获取文件临时访问 Url
+     * @param string $path
+     * @param \DateTimeInterface $expiration
+     * @param array $options
+     * @return string
+     * @throws OssException
+     */
+    public function getTemporaryUrl(string $path, \DateTimeInterface $expiration, array $options = []): string
+    {
+        $location = $this->prefixer->prefixPath($path);
+        $timeout = $expiration->getTimestamp() - time();
+        return $this->client->signUrl($this->getBucket(), $location, $timeout, OssClient::OSS_HTTP_GET, $options);
     }
 
     /**
