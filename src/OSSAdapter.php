@@ -13,20 +13,17 @@ use League\Flysystem\DirectoryAttributes;
 use League\Flysystem\FileAttributes;
 use League\Flysystem\FilesystemAdapter;
 use League\Flysystem\FilesystemException;
-use League\Flysystem\InvalidVisibilityProvided;
 use League\Flysystem\PathPrefixer;
+use League\Flysystem\StorageAttributes;
 use League\Flysystem\UnableToCheckExistence;
 use League\Flysystem\UnableToCopyFile;
 use League\Flysystem\UnableToCreateDirectory;
 use League\Flysystem\UnableToDeleteDirectory;
 use League\Flysystem\UnableToDeleteFile;
-use League\Flysystem\UnableToMoveFile;
 use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToSetVisibility;
 use League\Flysystem\UnableToWriteFile;
-use League\Flysystem\UnixVisibility\PortableVisibilityConverter;
-use League\MimeTypeDetection\FinfoMimeTypeDetector;
 use OSS\Core\OssException;
 use OSS\OssClient;
 
@@ -36,7 +33,7 @@ use OSS\OssClient;
 class OSSAdapter implements FilesystemAdapter
 {
     /**
-     * @var OssClient|null
+     * @var OssClient
      */
     protected OssClient $client;
 
@@ -44,12 +41,26 @@ class OSSAdapter implements FilesystemAdapter
      * @var array
      */
     protected array $config = [];
+
     protected PathPrefixer $prefixer;
+
+    /**
+     * 导出扩展 MetaData 字段
+     * @var string[]
+     */
+    private const EXTRA_METADATA_FIELDS = [
+        'x-oss-object-type',
+        'x-oss-storage-class',
+        'x-oss-hash-crc64ecma',
+        'etag',
+        'content-md5',
+    ];
 
     /**
      * Adapter constructor.
      *
      * @param array $config
+     * @throws OssException
      */
     public function __construct(array $config)
     {
@@ -67,7 +78,7 @@ class OSSAdapter implements FilesystemAdapter
     public function fileExists(string $path): bool
     {
         try {
-            return $this->getMetadata($path) !== null;
+            return $this->fetchFileMetadata($path) !== null;
         } catch (OssException $exception) {
             throw UnableToCheckExistence::forLocation($path, $exception);
         }
@@ -138,11 +149,11 @@ class OSSAdapter implements FilesystemAdapter
     /**
      * 读取流
      * @param string $path
-     * @return false|resource|string
+     * @return false|resource
      */
     public function readStream(string $path)
     {
-        if ( ! $data = $this->read($path)) {
+        if (!$data = $this->read($path)) {
             return false;
         }
         $stream = fopen('php://temp', 'w+b');
@@ -211,9 +222,9 @@ class OSSAdapter implements FilesystemAdapter
     public function setVisibility(string $path, string $visibility): void
     {
         try {
-            $this->client->putObjectACL($this->getBucket(), $this->prefixer->prefixPath($path), $visibility);
+            $this->client->putObjectAcl($this->getBucket(), $this->prefixer->prefixPath($path), $this->visibility->visibilityToAcl($visibility));
         } catch (OssException $exception) {
-            UnableToSetVisibility::atLocation($path, $exception->getMessage());
+            throw UnableToSetVisibility::atLocation($path, $exception->getErrorMessage(), $exception);
         }
     }
 
@@ -225,11 +236,11 @@ class OSSAdapter implements FilesystemAdapter
     public function visibility(string $path): FileAttributes
     {
         try {
-            $acl = $this->client->getObjectAcl($this->getBucket(), $this->prefixer->prefixPath($path));
+            $result = $this->client->getObjectAcl($this->getBucket(), $this->prefixer->prefixPath($path));
         } catch (OssException $exception) {
             throw UnableToRetrieveMetadata::visibility($path, $exception->getErrorMessage(), $exception);
         }
-        $visibility = $this->visibility->aclToVisibility($acl);
+        $visibility = $this->visibility->aclToVisibility((array)$result['Grants']);
         return new FileAttributes($path, null, $visibility);
     }
 
@@ -237,47 +248,42 @@ class OSSAdapter implements FilesystemAdapter
      * 获取内容类型
      * @param string $path
      * @return FileAttributes
-     * @throws OssException
      */
     public function mimeType(string $path): FileAttributes
     {
-        $meta = $this->getMetadata($path);
-        if ($meta->mimeType() === null) {
+        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_MIME_TYPE);
+        if ($attributes->mimeType() === null) {
             throw UnableToRetrieveMetadata::mimeType($path);
         }
-        return $meta;
+        return $attributes;
     }
 
     /**
      * 获取最后更改
      * @param string $path
      * @return FileAttributes
-     * @throws OssException
      */
     public function lastModified(string $path): FileAttributes
     {
-        $meta = $this->getMetadata($path);
-        if ($meta->lastModified() === null) {
+        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_LAST_MODIFIED);
+        if ($attributes->lastModified() === null) {
             throw UnableToRetrieveMetadata::lastModified($path);
         }
-
-        return $meta;
+        return $attributes;
     }
 
     /**
      * 获取文件大小
      * @param string $path
      * @return FileAttributes
-     * @throws OssException
      */
     public function fileSize(string $path): FileAttributes
     {
-        $meta = $this->getMetadata($path);
-        if ($meta->fileSize() === null) {
+        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_FILE_SIZE);
+        if ($attributes->fileSize() === null) {
             throw UnableToRetrieveMetadata::fileSize($path);
         }
-
-        return $meta;
+        return $attributes;
     }
 
     /**
@@ -321,6 +327,7 @@ class OSSAdapter implements FilesystemAdapter
      * @param string $path
      * @param bool $deep
      * @return iterable
+     * @throws OssException
      */
     public function listContents(string $path, bool $deep): iterable
     {
@@ -404,28 +411,64 @@ class OSSAdapter implements FilesystemAdapter
     /**
      * 获取文件 MetaData
      * @param string $path
+     * @param string $type
      * @return FileAttributes|null
-     * @throws OssException
      */
-    protected function getMetadata(string $path): ?FileAttributes
+    private function fetchFileMetadata(string $path, string $type): ?FileAttributes
     {
-        $prefixedPath = $this->prefixer->prefixPath($path);
-        $meta = $this->client->getObjectMeta($this->getBucket(), $prefixedPath);
-        if (empty($meta)) {
-            return null;
+        try {
+            $meta = $this->client->getObjectMeta($this->getBucket(), $this->prefixer->prefixPath($path));
+        } catch (OssException $exception) {
+            throw UnableToRetrieveMetadata::create($path, $type, $exception->getErrorMessage(), $exception);
         }
-        return new FileAttributes($path,
-            isset($meta['content-length']) ? \intval($meta['content-length']) : null,
-            null,
-            isset($meta['last-modified']) ? \strtotime($meta['last-modified']) : null,
-            $meta['content-type'] ?? null,
-        );
+        $attributes = $this->mapObjectMetadata($meta, $path);
+        if (!$attributes instanceof FileAttributes) {
+            throw UnableToRetrieveMetadata::create($path, $type, '');
+        }
+        return $attributes;
+    }
+
+    /**
+     * 映射Meta
+     * @param array $metadata
+     * @param string|null $path
+     * @return StorageAttributes
+     */
+    private function mapObjectMetadata(array $metadata, string $path = null): StorageAttributes
+    {
+        if ($path === null) {
+            $path = $this->prefixer->stripPrefix($metadata['Key'] ?? $metadata['Prefix']);
+        }
+        if (str_ends_with($path, '/')) {
+            return new DirectoryAttributes(rtrim($path, '/'));
+        }
+        $mimetype = $metadata['content-type'] ?? null;
+        $fileSize = $metadata['content-length'] ?? null;
+        $fileSize = $fileSize === null ? null : (int)$fileSize;
+        $dateTime = $metadata['last-modified'] ?? null;
+        $lastModified = $dateTime ? strtotime($dateTime) : null;
+        return new FileAttributes($path, $fileSize, null, $lastModified, $mimetype, $this->extractExtraMetadata($metadata));
+    }
+
+    /**
+     * 导出扩展 Meta Data
+     * @param array $metadata
+     * @return array
+     */
+    private function extractExtraMetadata(array $metadata): array
+    {
+        $extracted = [];
+        foreach (static::EXTRA_METADATA_FIELDS as $field) {
+            if (isset($metadata[$field]) && $metadata[$field] !== '') {
+                $extracted[$field] = $metadata[$field];
+            }
+        }
+        return $extracted;
     }
 
     /**
      * 获取 OSS 客户端
      * @return OssClient
-     * @throws OssException
      */
     public function getClient(): OssClient
     {
