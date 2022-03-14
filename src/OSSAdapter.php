@@ -14,6 +14,7 @@ use League\Flysystem\FilesystemAdapter;
 use League\Flysystem\FilesystemException;
 use League\Flysystem\InvalidVisibilityProvided;
 use League\Flysystem\PathPrefixer;
+use League\Flysystem\UnableToCheckExistence;
 use League\Flysystem\UnableToCopyFile;
 use League\Flysystem\UnableToCreateDirectory;
 use League\Flysystem\UnableToDeleteDirectory;
@@ -23,6 +24,8 @@ use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToSetVisibility;
 use League\Flysystem\UnableToWriteFile;
+use League\Flysystem\UnixVisibility\PortableVisibilityConverter;
+use League\MimeTypeDetection\FinfoMimeTypeDetector;
 use OSS\Core\OssException;
 use OSS\OssClient;
 
@@ -41,26 +44,37 @@ class OSSAdapter implements FilesystemAdapter
      */
     protected array $config = [];
     protected PathPrefixer $prefixer;
+    protected VisibilityConverter $visibility;
+    protected MimeTypeDetector $mimeTypeDetector;
 
     /**
      * Adapter constructor.
      *
      * @param array $config
+     * @param VisibilityConverter|null $visibility
+     * @param MimeTypeDetector|null $mimeTypeDetector
      */
-    public function __construct(array $config)
+    public function __construct(array $config, VisibilityConverter $visibility = null, MimeTypeDetector $mimeTypeDetector = null)
     {
         $this->config = $config;
         $this->prefixer = new PathPrefixer($config['prefix'] ?? '', DIRECTORY_SEPARATOR);
+        $this->visibility = $visibility ?: new PortableVisibilityConverter();
+        $this->mimeTypeDetector = $mimeTypeDetector ?: new FinfoMimeTypeDetector();
     }
 
     /**
      * 判断文件是否存在
      * @param string $path
      * @return bool
+     * @throws UnableToCheckExistence
      */
     public function fileExists(string $path): bool
     {
-        return $this->getMetadata($path) !== null;
+        try {
+            return $this->getMetadata($path) !== null;
+        } catch (OssException $exception) {
+            throw UnableToCheckExistence::forLocation($path, $exception);
+        }
     }
 
     /**
@@ -70,7 +84,11 @@ class OSSAdapter implements FilesystemAdapter
      */
     public function directoryExists(string $path): bool
     {
-        return $this->fileExists($path);
+        try {
+            return $this->fileExists($path);
+        } catch (UnableToCheckExistence $exception) {
+            throw UnableToCheckExistence::forLocation($path, $exception);
+        }
     }
 
     /**
@@ -135,8 +153,10 @@ class OSSAdapter implements FilesystemAdapter
         $prefixedPath = $this->prefixer->prefixPath($path);
         try {
             $this->getObjectClient()->deleteObject($this->getBucket(), $prefixedPath);
-        } catch (OssException $e) {
-            throw UnableToDeleteFile::atLocation($path, $e->getMessage());
+        } catch (OssException $exception) {
+            throw UnableToDeleteFile::atLocation($path, $exception->getErrorMessage(), $exception);
+        } catch (\Throwable $exception) {
+            throw UnableToDeleteFile::atLocation($path, '', $exception);
         }
     }
 
@@ -176,7 +196,15 @@ class OSSAdapter implements FilesystemAdapter
 
     public function visibility(string $path): FileAttributes
     {
-        // TODO: Implement visibility() method.
+        try {
+            $acl = $this->getObjectClient()->getObjectAcl($this->getBucket(), $this->prefixer->prefixPath($path));
+        } catch (OssException $exception) {
+            throw UnableToRetrieveMetadata::visibility($path, $exception->getErrorMessage(), $exception);
+        } catch (\Throwable $exception) {
+            throw UnableToRetrieveMetadata::visibility($path, '', $exception);
+        }
+        $visibility = $this->visibility->aclToVisibility($acl);
+        return new FileAttributes($path, null, $visibility);
     }
 
     /**
