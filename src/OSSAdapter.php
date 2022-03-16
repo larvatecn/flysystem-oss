@@ -7,12 +7,12 @@
 
 namespace Larva\Flysystem\Oss;
 
-use Carbon\Carbon;
 use League\Flysystem\Config;
 use League\Flysystem\DirectoryAttributes;
 use League\Flysystem\FileAttributes;
 use League\Flysystem\FilesystemAdapter;
 use League\Flysystem\FilesystemException;
+use League\Flysystem\FilesystemOperationFailed;
 use League\Flysystem\PathPrefixer;
 use League\Flysystem\StorageAttributes;
 use League\Flysystem\UnableToCheckExistence;
@@ -20,12 +20,14 @@ use League\Flysystem\UnableToCopyFile;
 use League\Flysystem\UnableToCreateDirectory;
 use League\Flysystem\UnableToDeleteDirectory;
 use League\Flysystem\UnableToDeleteFile;
+use League\Flysystem\UnableToMoveFile;
 use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToSetVisibility;
 use League\Flysystem\UnableToWriteFile;
 use OSS\Core\OssException;
 use OSS\OssClient;
+use Throwable;
 
 /**
  * 阿里云适配器
@@ -33,19 +35,14 @@ use OSS\OssClient;
 class OSSAdapter implements FilesystemAdapter
 {
     /**
-     * @var OssClient
+     * @var string[]
      */
-    protected OssClient $client;
+    public const AVAILABLE_OPTIONS = [
+
+    ];
 
     /**
-     * @var array
-     */
-    protected array $config = [];
-
-    protected PathPrefixer $prefixer;
-
-    /**
-     * 导出扩展 MetaData 字段
+     * 扩展 MetaData 字段
      * @var string[]
      */
     private const EXTRA_METADATA_FIELDS = [
@@ -57,16 +54,40 @@ class OSSAdapter implements FilesystemAdapter
     ];
 
     /**
+     * @var OssClient
+     */
+    private OssClient $client;
+
+    /**
+     * @var array
+     */
+    protected array $config = [];
+
+    private PathPrefixer $prefixer;
+
+    /**
+     * @var string
+     */
+    private $bucket;
+
+    /**
+     * @var array
+     */
+    private $options;
+
+    /**
      * Adapter constructor.
      *
      * @param array $config
      * @throws OssException
      */
-    public function __construct(array $config)
+    public function __construct(array $config, array $options = [])
     {
         $this->config = $config;
         $this->client = new OssClient($config['access_id'], $config['access_key'], $config['endpoint'], false, $config['security_token'] ?? null, $config['proxy'] ?? null);
-        $this->prefixer = new PathPrefixer($config['prefix'] ?? '', DIRECTORY_SEPARATOR);
+        $this->prefixer = new PathPrefixer($config['prefix'] ?? '');
+        $this->bucket = $config['bucket'];
+        $this->options = $options;
     }
 
     /**
@@ -78,8 +99,8 @@ class OSSAdapter implements FilesystemAdapter
     public function fileExists(string $path): bool
     {
         try {
-            return $this->fetchFileMetadata($path) !== null;
-        } catch (OssException $exception) {
+            return $this->client->doesObjectExist($this->bucket, $this->prefixer->prefixPath($path), $this->options);
+        } catch (Throwable $exception) {
             throw UnableToCheckExistence::forLocation($path, $exception);
         }
     }
@@ -92,8 +113,11 @@ class OSSAdapter implements FilesystemAdapter
     public function directoryExists(string $path): bool
     {
         try {
-            return $this->fileExists($path);
-        } catch (UnableToCheckExistence $exception) {
+            $prefix = $this->prefixer->prefixDirectoryPath($path);
+            $options = ['prefix' => $prefix, 'delimiter' => '/'];
+            $objectListInfo = $this->client->listObjects($this->bucket, $options);
+            return count($objectListInfo->getObjectList()) > 0;
+        } catch (OssException $exception) {
             throw UnableToCheckExistence::forLocation($path, $exception);
         }
     }
@@ -109,13 +133,51 @@ class OSSAdapter implements FilesystemAdapter
     {
         $prefixedPath = $this->prefixer->prefixPath($path);
         try {
-            $this->client->putObject($this->getBucket(), $prefixedPath, $contents, $config->get('headers', []));
-        } catch (OssException $exception) {
+            $this->client->putObject($this->bucket, $prefixedPath, $contents, $config->get('headers', []));
+        } catch (Throwable $exception) {
             throw UnableToWriteFile::atLocation($path, $exception->getMessage());
         }
         if ($visibility = $config->get('visibility')) {
             $this->setVisibility($path, $visibility);
         }
+    }
+
+    /**
+     * @param string          $path
+     * @param string|resource $body
+     * @param Config          $config
+     */
+    private function upload(string $path, $body, Config $config): void
+    {
+        $key = $this->prefixer->prefixPath($path);
+        $options = $this->createOptionsFromConfig($config);
+        $shouldDetermineMimetype = $body !== '' && ! array_key_exists('ContentType', $options);
+        if ($shouldDetermineMimetype && $mimeType = $this->mimeTypeDetector->detectMimeType($key, $body)) {
+            $options['ContentType'] = $mimeType;
+        }
+        try {
+            $this->client->putObject($this->bucket, $key, $body);
+        } catch (Throwable $exception) {
+            throw UnableToWriteFile::atLocation($path, '', $exception);
+        }
+    }
+
+    /**
+     * 从配置创建参数
+     * @param Config $config
+     * @return array
+     */
+    private function createOptionsFromConfig(Config $config): array
+    {
+        $options = [];
+        foreach (static::AVAILABLE_OPTIONS as $option) {
+            $value = $config->get($option, '__NOT_SET__');
+
+            if ($value !== '__NOT_SET__') {
+                $options[$option] = $value;
+            }
+        }
+        return $options + $this->options;
     }
 
     /**
@@ -139,9 +201,9 @@ class OSSAdapter implements FilesystemAdapter
     {
         $prefixedPath = $this->prefixer->prefixPath($path);
         try {
-            $contents = $this->client->getObject($this->getBucket(), $prefixedPath);
-        } catch (OssException $exception) {
-            throw UnableToReadFile::fromLocation($path, $exception->getErrorMessage());
+            $contents = $this->client->getObject($this->bucket, $prefixedPath);
+        } catch (Throwable $exception) {
+            throw UnableToReadFile::fromLocation($path, $exception->getMessage());
         }
         return $contents;
     }
@@ -170,32 +232,30 @@ class OSSAdapter implements FilesystemAdapter
     {
         $prefixedPath = $this->prefixer->prefixPath($path);
         try {
-            $this->client->deleteObject($this->getBucket(), $prefixedPath);
-        } catch (OssException $exception) {
-            throw UnableToDeleteFile::atLocation($path, $exception->getErrorMessage(), $exception);
+            $this->client->deleteObject($this->bucket, $prefixedPath);
+        } catch (Throwable $exception) {
+            throw UnableToDeleteFile::atLocation($path, '', $exception);
         }
     }
 
     /**
      * 删除目录
      * @param string $path
-     * @throws OssException
      */
     public function deleteDirectory(string $path): void
     {
-        $dirname = $this->prefixer->prefixPath($path);
-        $response = $this->listObjects($dirname, true);
-        if (empty($response['Contents'])) {
-            return;
-        }
-        $objects = array_map(function ($item) {
-            return ['Key' => $item['Key']];
-        }, $response['Contents']);
-
         try {
-            $this->client->deleteObjects($this->getBucket(), $objects);
-        } catch (OssException $exception) {
-            throw UnableToDeleteDirectory::atLocation($path, $exception->getErrorMessage());
+            $prefix = $this->prefixer->prefixPath($path);
+            $objectListInfo = $this->listObjects($prefix, true);
+            if (empty($objectListInfo['Contents'])) {
+                return;
+            }
+            $objects = array_map(function ($item) {
+                return $item['Key'];
+            }, $objectListInfo['Contents']);
+            $this->client->deleteObjects($this->bucket, $objects);
+        } catch (Throwable $exception) {
+            throw UnableToDeleteDirectory::atLocation($path, '', $exception);
         }
     }
 
@@ -208,9 +268,9 @@ class OSSAdapter implements FilesystemAdapter
     {
         $dirname = $this->prefixer->prefixPath($path);
         try {
-            $this->client->createObjectDir($this->getBucket(), $dirname);
-        } catch (OssException $exception) {
-            UnableToCreateDirectory::atLocation($path, $exception->getErrorMessage());
+            $this->client->createObjectDir($this->bucket, $dirname);
+        } catch (Throwable $exception) {
+            UnableToCreateDirectory::atLocation($path, $exception->getMessage());
         }
     }
 
@@ -222,7 +282,7 @@ class OSSAdapter implements FilesystemAdapter
     public function setVisibility(string $path, string $visibility): void
     {
         try {
-            $this->client->putObjectAcl($this->getBucket(), $this->prefixer->prefixPath($path), $this->visibility->visibilityToAcl($visibility));
+            $this->client->putObjectAcl($this->bucket, $this->prefixer->prefixPath($path), $this->visibility->visibilityToAcl($visibility));
         } catch (OssException $exception) {
             throw UnableToSetVisibility::atLocation($path, $exception->getErrorMessage(), $exception);
         }
@@ -236,176 +296,12 @@ class OSSAdapter implements FilesystemAdapter
     public function visibility(string $path): FileAttributes
     {
         try {
-            $result = $this->client->getObjectAcl($this->getBucket(), $this->prefixer->prefixPath($path));
+            $result = $this->client->getObjectAcl($this->bucket, $this->prefixer->prefixPath($path));
         } catch (OssException $exception) {
             throw UnableToRetrieveMetadata::visibility($path, $exception->getErrorMessage(), $exception);
         }
         $visibility = $this->visibility->aclToVisibility((array)$result['Grants']);
         return new FileAttributes($path, null, $visibility);
-    }
-
-    /**
-     * 获取内容类型
-     * @param string $path
-     * @return FileAttributes
-     */
-    public function mimeType(string $path): FileAttributes
-    {
-        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_MIME_TYPE);
-        if ($attributes->mimeType() === null) {
-            throw UnableToRetrieveMetadata::mimeType($path);
-        }
-        return $attributes;
-    }
-
-    /**
-     * 获取最后更改
-     * @param string $path
-     * @return FileAttributes
-     */
-    public function lastModified(string $path): FileAttributes
-    {
-        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_LAST_MODIFIED);
-        if ($attributes->lastModified() === null) {
-            throw UnableToRetrieveMetadata::lastModified($path);
-        }
-        return $attributes;
-    }
-
-    /**
-     * 获取文件大小
-     * @param string $path
-     * @return FileAttributes
-     */
-    public function fileSize(string $path): FileAttributes
-    {
-        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_FILE_SIZE);
-        if ($attributes->fileSize() === null) {
-            throw UnableToRetrieveMetadata::fileSize($path);
-        }
-        return $attributes;
-    }
-
-    /**
-     * 获取对象访问 Url
-     * @param string $path
-     * @return string
-     * @throws OssException
-     */
-    public function getUrl(string $path): string
-    {
-        $location = $this->prefixer->prefixPath($path);
-        if (isset($this->config['url']) && !empty($this->config['url'])) {
-            return $this->config['url'] . '/' . ltrim($location, '/');
-        } else {
-            $visibility = $this->visibility($path);
-            if ($visibility && $visibility['visibility'] == 'private') {
-                return $this->getTemporaryUrl($path, Carbon::now()->addMinutes(5), []);
-            }
-            $scheme = $this->config['ssl'] ? 'https://' : 'http://';
-            return $scheme . $this->getBucket() . '.' . $this->config['endpoint'] . '/' . ltrim($location, '/');
-        }
-    }
-
-    /**
-     * 获取文件临时访问 Url
-     * @param string $path
-     * @param \DateTimeInterface $expiration
-     * @param array $options
-     * @return string
-     * @throws OssException
-     */
-    public function getTemporaryUrl(string $path, \DateTimeInterface $expiration, array $options = []): string
-    {
-        $location = $this->prefixer->prefixPath($path);
-        $timeout = $expiration->getTimestamp() - time();
-        return $this->client->signUrl($this->getBucket(), $location, $timeout, OssClient::OSS_HTTP_GET, $options);
-    }
-
-    /**
-     * 列出对象
-     * @param string $path
-     * @param bool $deep
-     * @return iterable
-     * @throws OssException
-     */
-    public function listContents(string $path, bool $deep): iterable
-    {
-        $prefixedPath = $this->prefixer->prefixPath($path);
-        $response = $this->listObjects($prefixedPath, $deep);
-        // 处理目录
-        foreach ($response['CommonPrefixes'] ?? [] as $prefix) {
-            yield new DirectoryAttributes($prefix['Prefix']);
-        }
-        //处理文件
-        foreach ($response['Contents'] ?? [] as $content) {
-            yield new FileAttributes(
-                $content['Key'],
-                \intval($content['Size']),
-                null,
-                \strtotime($content['LastModified'])
-            );
-        }
-    }
-
-    /**
-     * 移动对象到新位置
-     * @param string $source
-     * @param string $destination
-     * @param Config $config
-     */
-    public function move(string $source, string $destination, Config $config): void
-    {
-        $this->copy($source, $destination, $config);
-        $this->delete($this->prefixer->prefixPath($source));
-    }
-
-    /**
-     * 复制对象到新位置
-     * @param string $source
-     * @param string $destination
-     * @param Config $config
-     */
-    public function copy(string $source, string $destination, Config $config): void
-    {
-        $prefixedSource = $this->prefixer->prefixPath($source);
-        $location = $this->getSourcePath($prefixedSource);
-        $prefixedDestination = $this->prefixer->prefixPath($destination);
-        try {
-            $this->client->copyObject($this->getBucket(), $prefixedSource, $this->getBucket(), $prefixedDestination);
-        } catch (OssException $exception) {
-            throw UnableToCopyFile::fromLocationTo($source, $destination);
-        }
-    }
-
-    /**
-     * 列出对象
-     * @param string $directory
-     * @param bool $recursive
-     * @return array
-     * @throws OssException
-     */
-    protected function listObjects(string $directory = '', bool $recursive = false)
-    {
-        $objectListInfo = $this->client->listObjects($this->getBucket(), [
-            'prefix' => ('' === (string)$directory) ? '' : ($directory . '/'),
-            'delimiter' => $recursive ? '' : '/',
-            'max-keys' => 1000,
-        ]);
-        $result = [];
-        // 处理目录
-        foreach ($objectListInfo->getPrefixList() ?? [] as $prefix) {
-            $result['CommonPrefixes'][] = ['Prefix' => $prefix->getPrefix()];
-        }
-        //处理文件
-        foreach ($objectListInfo->getObjectList() ?? [] as $content) {
-            $result['Contents'][] = [
-                'Key' => $content->getKey(),
-                'LastModified' => $content->getLastModified(),
-                'Size' => $content->getSize(),
-            ];
-        }
-        return $result;
     }
 
     /**
@@ -417,8 +313,8 @@ class OSSAdapter implements FilesystemAdapter
     private function fetchFileMetadata(string $path, string $type): ?FileAttributes
     {
         try {
-            $meta = $this->client->getObjectMeta($this->getBucket(), $this->prefixer->prefixPath($path));
-        } catch (OssException $exception) {
+            $meta = $this->client->getObjectMeta($this->bucket, $this->prefixer->prefixPath($path));
+        } catch (Throwable $exception) {
             throw UnableToRetrieveMetadata::create($path, $type, $exception->getErrorMessage(), $exception);
         }
         $attributes = $this->mapObjectMetadata($meta, $path);
@@ -467,32 +363,126 @@ class OSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 获取 OSS 客户端
-     * @return OssClient
+     * 获取内容类型
+     * @param string $path
+     * @return FileAttributes
      */
-    public function getClient(): OssClient
+    public function mimeType(string $path): FileAttributes
     {
-        return $this->client;
+        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_MIME_TYPE);
+        if ($attributes->mimeType() === null) {
+            throw UnableToRetrieveMetadata::mimeType($path);
+        }
+        return $attributes;
     }
 
     /**
-     * 设置客户端
-     * @param OssClient $objectClient
-     * @return OSSAdapter
+     * 获取最后更改
+     * @param string $path
+     * @return FileAttributes
      */
-    public function setClient(OssClient $objectClient): OSSAdapter
+    public function lastModified(string $path): FileAttributes
     {
-        $this->client = $objectClient;
-        return $this;
+        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_LAST_MODIFIED);
+        if ($attributes->lastModified() === null) {
+            throw UnableToRetrieveMetadata::lastModified($path);
+        }
+        return $attributes;
     }
 
     /**
-     * Get the Aliyun Oss Client bucket.
-     *
-     * @return string
+     * 获取文件大小
+     * @param string $path
+     * @return FileAttributes
      */
-    public function getBucket(): string
+    public function fileSize(string $path): FileAttributes
     {
-        return $this->config['bucket'];
+        $attributes = $this->fetchFileMetadata($path, FileAttributes::ATTRIBUTE_FILE_SIZE);
+        if ($attributes->fileSize() === null) {
+            throw UnableToRetrieveMetadata::fileSize($path);
+        }
+        return $attributes;
+    }
+
+    /**
+     * 列出对象
+     * @param string $path
+     * @param bool $deep
+     * @return iterable
+     * @throws OssException
+     */
+    public function listContents(string $path, bool $deep): iterable
+    {
+        $prefixedPath = $this->prefixer->prefixPath($path);
+        $response = $this->listObjects($prefixedPath, $deep);
+        // 处理目录
+        foreach ($response['CommonPrefixes'] ?? [] as $prefix) {
+            yield new DirectoryAttributes($prefix['Prefix']);
+        }
+        //处理文件
+        foreach ($response['Contents'] ?? [] as $content) {
+            yield new FileAttributes($content['Key'], intval($content['Size']), null, strtotime($content['LastModified']));
+        }
+    }
+
+    /**
+     * 移动对象到新位置
+     * @param string $source
+     * @param string $destination
+     * @param Config $config
+     */
+    public function move(string $source, string $destination, Config $config): void
+    {
+        try {
+            $this->copy($source, $destination, $config);
+            $this->delete($source);
+        } catch (FilesystemOperationFailed $exception) {
+            throw UnableToMoveFile::fromLocationTo($source, $destination, $exception);
+        }
+    }
+
+    /**
+     * 复制对象到新位置
+     * @param string $source
+     * @param string $destination
+     * @param Config $config
+     */
+    public function copy(string $source, string $destination, Config $config): void
+    {
+        try {
+            $this->client->copyObject($this->bucket, $this->prefixer->prefixPath($source), $this->bucket, $this->prefixer->prefixPath($destination));
+        } catch (Throwable $exception) {
+            throw UnableToCopyFile::fromLocationTo($source, $destination, $exception);
+        }
+    }
+
+    /**
+     * 列出对象
+     * @param string $directory
+     * @param bool $recursive
+     * @return array
+     * @throws OssException
+     */
+    private function listObjects(string $directory = '', bool $recursive = false): array
+    {
+        $objectListInfo = $this->client->listObjects($this->bucket, [
+            'prefix' => ('' === $directory) ? '' : ($directory . '/'),
+            'delimiter' => $recursive ? '' : '/',
+            'max-keys' => 1000,
+        ]);
+        $result = [];
+        // 处理目录
+        foreach ($objectListInfo->getPrefixList() ?? [] as $prefix) {
+            $result['CommonPrefixes'][] = ['Prefix' => $prefix->getPrefix()];
+        }
+        //处理文件
+        foreach ($objectListInfo->getObjectList() ?? [] as $content) {
+            $result['Contents'][] = [
+                'Key' => $content->getKey(),
+                'LastModified' => $content->getLastModified(),
+                'Size' => $content->getSize(),
+            ];
+        }
+        return $result;
     }
 }

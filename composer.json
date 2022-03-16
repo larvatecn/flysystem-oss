@@ -2,8 +2,7 @@
     "name": "larva/flysystem-oss",
     "description": "Flysystem adapter for the Aliyun OSS storage.",
     "require": {
-        "nesbot/carbon": "^2.53.1",
-        "league/flysystem": "^3.0",
+        "league/flysystem": "^2.0|^3.0",
         "league/mime-type-detection": "^1.0.0",
         "aliyuncs/oss-sdk-php": "^2.4"
     },
