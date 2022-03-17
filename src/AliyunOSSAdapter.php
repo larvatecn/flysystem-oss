@@ -32,7 +32,7 @@ use Throwable;
 /**
  * 阿里云适配器
  */
-class OSSAdapter implements FilesystemAdapter
+class AliyunOSSAdapter implements FilesystemAdapter
 {
     /**
      * @var string[]
@@ -139,26 +139,6 @@ class OSSAdapter implements FilesystemAdapter
         }
         if ($visibility = $config->get('visibility')) {
             $this->setVisibility($path, $visibility);
-        }
-    }
-
-    /**
-     * @param string          $path
-     * @param string|resource $body
-     * @param Config          $config
-     */
-    private function upload(string $path, $body, Config $config): void
-    {
-        $key = $this->prefixer->prefixPath($path);
-        $options = $this->createOptionsFromConfig($config);
-        $shouldDetermineMimetype = $body !== '' && ! array_key_exists('ContentType', $options);
-        if ($shouldDetermineMimetype && $mimeType = $this->mimeTypeDetector->detectMimeType($key, $body)) {
-            $options['ContentType'] = $mimeType;
-        }
-        try {
-            $this->client->putObject($this->bucket, $key, $body);
-        } catch (Throwable $exception) {
-            throw UnableToWriteFile::atLocation($path, '', $exception);
         }
     }
 
