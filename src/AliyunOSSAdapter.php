@@ -320,11 +320,11 @@ class AliyunOSSAdapter implements FilesystemAdapter
     public function visibility(string $path): FileAttributes
     {
         try {
-            $result = $this->client->getObjectAcl($this->bucket, $this->prefixer->prefixPath($path));
+            $acl = $this->client->getObjectAcl($this->bucket, $this->prefixer->prefixPath($path));
         } catch (OssException $exception) {
             throw UnableToRetrieveMetadata::visibility($path, $exception->getErrorMessage(), $exception);
         }
-        $visibility = $this->visibility->aclToVisibility((array)$result['Grants']);
+        $visibility = $this->visibility->aclToVisibility($acl);
         return new FileAttributes($path, null, $visibility);
     }
 
