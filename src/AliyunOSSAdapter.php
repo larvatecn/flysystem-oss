@@ -98,7 +98,6 @@ class AliyunOSSAdapter implements FilesystemAdapter
      * @param VisibilityConverter|null $visibility
      * @param MimeTypeDetector|null $mimeTypeDetector
      * @param array $options
-     * @param bool $streamReads
      */
     public function __construct(OssClient $client, string $bucket, string $prefix = '', VisibilityConverter $visibility = null, MimeTypeDetector $mimeTypeDetector = null, array $options = [])
     {
