@@ -6,7 +6,6 @@ use League\Flysystem\Visibility;
 
 class PortableVisibilityConverter implements VisibilityConverter
 {
-    private const PUBLIC_GRANTEE_URI = 'http://cam.qcloud.com/groups/global/AllUsers';
     private const PUBLIC_GRANTS_PERMISSION = 'READ';
     private const PUBLIC_ACL = 'public-read';
     private const PRIVATE_ACL = 'private';
@@ -33,9 +32,8 @@ class PortableVisibilityConverter implements VisibilityConverter
     public function aclToVisibility(array $grants): string
     {
         foreach ($grants as $grant) {
-            $granteeUri = $grant['Grantee']['URI'] ?? null;
             $permission = $grant['Permission'] ?? null;
-            if ($granteeUri === self::PUBLIC_GRANTEE_URI && $permission === self::PUBLIC_GRANTS_PERMISSION) {
+            if ($permission === self::PUBLIC_ACL) {
                 return Visibility::PUBLIC;
             }
         }

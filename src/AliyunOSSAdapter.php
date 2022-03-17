@@ -25,6 +25,9 @@ use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToSetVisibility;
 use League\Flysystem\UnableToWriteFile;
+use League\Flysystem\Visibility;
+use League\MimeTypeDetection\FinfoMimeTypeDetector;
+use League\MimeTypeDetection\MimeTypeDetector;
 use OSS\Core\OssException;
 use OSS\OssClient;
 use Throwable;
@@ -38,7 +41,9 @@ class AliyunOSSAdapter implements FilesystemAdapter
      * @var string[]
      */
     public const AVAILABLE_OPTIONS = [
-
+        'Cache-Control', 'Content-Disposition', 'Content-Encoding', 'Content-MD5', 'Content-Length', 'ETag', 'Expires',
+        'x-oss-forbid-overwrite', 'x-oss-server-side-encryption', 'x-oss-server-side-data-encryption', 'x-oss-server-side-encryption-key-id',
+        'x-oss-object-acl', 'x-oss-storage-class', 'x-oss-tagging'
     ];
 
     /**
@@ -49,6 +54,7 @@ class AliyunOSSAdapter implements FilesystemAdapter
         'x-oss-object-type',
         'x-oss-storage-class',
         'x-oss-hash-crc64ecma',
+        'x-oss-version-id',
         'etag',
         'content-md5',
     ];
@@ -59,34 +65,48 @@ class AliyunOSSAdapter implements FilesystemAdapter
     private OssClient $client;
 
     /**
-     * @var array
+     * @var PathPrefixer
      */
-    protected array $config = [];
-
     private PathPrefixer $prefixer;
 
     /**
      * @var string
      */
-    private $bucket;
+    private string $bucket;
+
+    /**
+     * @var VisibilityConverter
+     */
+    private VisibilityConverter $visibility;
+
+    /**
+     * @var MimeTypeDetector
+     */
+    private MimeTypeDetector $mimeTypeDetector;
 
     /**
      * @var array
      */
-    private $options;
+    private array $options;
 
     /**
      * Adapter constructor.
      *
-     * @param array $config
-     * @throws OssException
+     * @param OssClient $client
+     * @param string $bucket
+     * @param string $prefix
+     * @param VisibilityConverter|null $visibility
+     * @param MimeTypeDetector|null $mimeTypeDetector
+     * @param array $options
+     * @param bool $streamReads
      */
-    public function __construct(array $config, array $options = [])
+    public function __construct(OssClient $client, string $bucket, string $prefix = '', VisibilityConverter $visibility = null, MimeTypeDetector $mimeTypeDetector = null, array $options = [])
     {
-        $this->config = $config;
-        $this->client = new OssClient($config['access_id'], $config['access_key'], $config['endpoint'], false, $config['security_token'] ?? null, $config['proxy'] ?? null);
-        $this->prefixer = new PathPrefixer($config['prefix'] ?? '');
-        $this->bucket = $config['bucket'];
+        $this->client = $client;
+        $this->prefixer = new PathPrefixer($prefix);
+        $this->bucket = $bucket;
+        $this->visibility = $visibility ?: new PortableVisibilityConverter();
+        $this->mimeTypeDetector = $mimeTypeDetector ?: new FinfoMimeTypeDetector();
         $this->options = $options;
     }
 
@@ -131,15 +151,39 @@ class AliyunOSSAdapter implements FilesystemAdapter
      */
     public function write(string $path, string $contents, Config $config): void
     {
-        $prefixedPath = $this->prefixer->prefixPath($path);
+        $this->upload($path, $contents, $config);
+    }
+
+    /**
+     * @param string $path
+     * @param string|resource $body
+     * @param Config $config
+     */
+    private function upload(string $path, $body, Config $config): void
+    {
+        $object = $this->prefixer->prefixPath($path);
+        $options = $this->createOptionsFromConfig($config);
+        $options['x-oss-object-acl'] = $this->determineAcl($config);
+        $shouldDetermineMimetype = $body !== '' && !array_key_exists('ContentType', $options);
+        if ($shouldDetermineMimetype && $mimeType = $this->mimeTypeDetector->detectMimeType($object, $body)) {
+            $options['ContentType'] = $mimeType;
+        }
         try {
-            $this->client->putObject($this->bucket, $prefixedPath, $contents, $config->get('headers', []));
+            $this->client->putObject($this->bucket, $object, $body, $options);
         } catch (Throwable $exception) {
-            throw UnableToWriteFile::atLocation($path, $exception->getMessage());
+            throw UnableToWriteFile::atLocation($path, '', $exception);
         }
-        if ($visibility = $config->get('visibility')) {
-            $this->setVisibility($path, $visibility);
-        }
+    }
+
+    /**
+     * 转换ACL
+     * @param Config $config
+     * @return string
+     */
+    private function determineAcl(Config $config): string
+    {
+        $visibility = (string)$config->get(Config::OPTION_VISIBILITY, Visibility::PRIVATE);
+        return $this->visibility->visibilityToAcl($visibility);
     }
 
     /**
@@ -169,7 +213,7 @@ class AliyunOSSAdapter implements FilesystemAdapter
      */
     public function writeStream(string $path, $contents, Config $config): void
     {
-        $this->write($path, \stream_get_contents($contents), $config);
+        $this->upload($path, \stream_get_contents($contents), $config);
     }
 
     /**
@@ -181,27 +225,28 @@ class AliyunOSSAdapter implements FilesystemAdapter
     {
         $prefixedPath = $this->prefixer->prefixPath($path);
         try {
-            $contents = $this->client->getObject($this->bucket, $prefixedPath);
+            return $this->client->getObject($this->bucket, $prefixedPath);
         } catch (Throwable $exception) {
             throw UnableToReadFile::fromLocation($path, $exception->getMessage());
         }
-        return $contents;
     }
 
     /**
      * 读取流
      * @param string $path
-     * @return false|resource
+     * @return resource
      */
     public function readStream(string $path)
     {
-        if (!$data = $this->read($path)) {
-            return false;
+        try {
+            $data = $this->read($path);
+            $stream = fopen('php://temp', 'w+b');
+            fwrite($stream, $data);
+            rewind($stream);
+            return $stream;
+        } catch (Throwable $exception) {
+            throw UnableToReadFile::fromLocation($path, $exception->getMessage());
         }
-        $stream = fopen('php://temp', 'w+b');
-        fwrite($stream, $data);
-        rewind($stream);
-        return $stream;
     }
 
     /**
