@@ -32,7 +32,7 @@ class PortableVisibilityConverter implements VisibilityConverter
     {
         if ($acl == 'default') {
             $this->defaultForDirectories();
-        } else if ($acl === self::PUBLIC_ACL) {
+        } elseif ($acl === self::PUBLIC_ACL) {
             return Visibility::PUBLIC;
         }
         return Visibility::PRIVATE;
