@@ -1,9 +1,4 @@
 <?php
-/**
- * This is NOT a freeware, use is subject to license terms
- * @copyright Copyright (c) 2010-2099 Jinan Larva Information Technology Co., Ltd.
- * @link http://www.larva.com.cn/
- */
 
 namespace Larva\Flysystem\Oss;
 
@@ -13,6 +8,7 @@ use League\Flysystem\FileAttributes;
 use League\Flysystem\FilesystemAdapter;
 use League\Flysystem\FilesystemException;
 use League\Flysystem\FilesystemOperationFailed;
+use League\Flysystem\InvalidVisibilityProvided;
 use League\Flysystem\PathPrefixer;
 use League\Flysystem\StorageAttributes;
 use League\Flysystem\UnableToCheckExistence;
@@ -33,7 +29,7 @@ use OSS\OssClient;
 use Throwable;
 
 /**
- * 阿里云适配器
+ * 阿里云 OSS 适配器
  */
 class AliyunOSSAdapter implements FilesystemAdapter
 {
@@ -110,9 +106,9 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 判断文件是否存在
-     * @param string $path
-     * @return bool
+     * 判断文件对象是否存在
+     *
+     * @throws FilesystemException
      * @throws UnableToCheckExistence
      */
     public function fileExists(string $path): bool
@@ -125,9 +121,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 判断文件夹是否存在
-     * @param string $path
-     * @return bool
+     * 判断目录是否存在
+     *
+     * @throws FilesystemException
+     * @throws UnableToCheckExistence
      */
     public function directoryExists(string $path): bool
     {
@@ -142,10 +139,9 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 写入一个文件
-     * @param string $path
-     * @param string $contents
-     * @param Config $config
+     * 写入文件到对象
+     *
+     * @throws UnableToWriteFile
      * @throws FilesystemException
      */
     public function write(string $path, string $contents, Config $config): void
@@ -154,6 +150,8 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
+     * 上传
+     *
      * @param string $path
      * @param string|resource $body
      * @param Config $config
@@ -204,10 +202,11 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 写入文件
-     * @param string $path
-     * @param $contents
-     * @param Config $config
+     * 将流写入对象
+     *
+     * @param resource $contents
+     *
+     * @throws UnableToWriteFile
      * @throws FilesystemException
      */
     public function writeStream(string $path, $contents, Config $config): void
@@ -216,9 +215,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 读取文件
-     * @param string $path
-     * @return string
+     * 读取对象
+     *
+     * @throws UnableToReadFile
+     * @throws FilesystemException
      */
     public function read(string $path): string
     {
@@ -231,9 +231,12 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 读取流
-     * @param string $path
+     * 以流的形式读取对象
+     *
      * @return resource
+     *
+     * @throws UnableToReadFile
+     * @throws FilesystemException
      */
     public function readStream(string $path)
     {
@@ -250,7 +253,9 @@ class AliyunOSSAdapter implements FilesystemAdapter
 
     /**
      * 删除对象
-     * @param string $path
+     *
+     * @throws UnableToDeleteFile
+     * @throws FilesystemException
      */
     public function delete(string $path): void
     {
@@ -264,7 +269,9 @@ class AliyunOSSAdapter implements FilesystemAdapter
 
     /**
      * 删除目录
-     * @param string $path
+     *
+     * @throws UnableToDeleteDirectory
+     * @throws FilesystemException
      */
     public function deleteDirectory(string $path): void
     {
@@ -284,9 +291,9 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 创建文件夹
-     * @param string $path
-     * @param Config $config
+     * 创建目录
+     *
+     * @throws UnableToCreateDirectory
      */
     public function createDirectory(string $path, Config $config): void
     {
@@ -299,9 +306,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 设置访问策略
-     * @param string $path
-     * @param string $visibility
+     * 设置对象可见性
+     *
+     * @throws InvalidVisibilityProvided
+     * @throws FilesystemException
      */
     public function setVisibility(string $path, string $visibility): void
     {
@@ -313,9 +321,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 获取访问策略
-     * @param string $path
-     * @return FileAttributes
+     * 获取对象可见性
+     *
+     * @throws UnableToRetrieveMetadata
+     * @throws FilesystemException
      */
     public function visibility(string $path): FileAttributes
     {
@@ -329,7 +338,7 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 获取文件 MetaData
+     * 获取对象 MetaData
      * @param string $path
      * @param string $type
      * @return FileAttributes|null
@@ -339,7 +348,7 @@ class AliyunOSSAdapter implements FilesystemAdapter
         try {
             $meta = $this->client->getObjectMeta($this->bucket, $this->prefixer->prefixPath($path));
         } catch (Throwable $exception) {
-            throw UnableToRetrieveMetadata::create($path, $type, $exception->getErrorMessage(), $exception);
+            throw UnableToRetrieveMetadata::create($path, $type, $exception->getMessage(), $exception);
         }
         $attributes = $this->mapObjectMetadata($meta, $path);
         if (!$attributes instanceof FileAttributes) {
@@ -387,9 +396,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 获取内容类型
-     * @param string $path
-     * @return FileAttributes
+     * 获取对象 mime type
+     *
+     * @throws UnableToRetrieveMetadata
+     * @throws FilesystemException
      */
     public function mimeType(string $path): FileAttributes
     {
@@ -401,9 +411,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 获取最后更改
-     * @param string $path
-     * @return FileAttributes
+     * 获取对象最后修改时间
+     *
+     * @throws UnableToRetrieveMetadata
+     * @throws FilesystemException
      */
     public function lastModified(string $path): FileAttributes
     {
@@ -415,9 +426,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
     }
 
     /**
-     * 获取文件大小
-     * @param string $path
-     * @return FileAttributes
+     * 获取对象大小
+     *
+     * @throws UnableToRetrieveMetadata
+     * @throws FilesystemException
      */
     public function fileSize(string $path): FileAttributes
     {
@@ -430,9 +442,10 @@ class AliyunOSSAdapter implements FilesystemAdapter
 
     /**
      * 列出对象
+     *
      * @param string $path
      * @param bool $deep
-     * @return iterable
+     * @return iterable<StorageAttributes>
      * @throws OssException
      */
     public function listContents(string $path, bool $deep): iterable
@@ -446,37 +459,6 @@ class AliyunOSSAdapter implements FilesystemAdapter
         //处理文件
         foreach ($response['Contents'] ?? [] as $content) {
             yield new FileAttributes($content['Key'], intval($content['Size']), null, strtotime($content['LastModified']));
-        }
-    }
-
-    /**
-     * 移动对象到新位置
-     * @param string $source
-     * @param string $destination
-     * @param Config $config
-     */
-    public function move(string $source, string $destination, Config $config): void
-    {
-        try {
-            $this->copy($source, $destination, $config);
-            $this->delete($source);
-        } catch (FilesystemOperationFailed $exception) {
-            throw UnableToMoveFile::fromLocationTo($source, $destination, $exception);
-        }
-    }
-
-    /**
-     * 复制对象到新位置
-     * @param string $source
-     * @param string $destination
-     * @param Config $config
-     */
-    public function copy(string $source, string $destination, Config $config): void
-    {
-        try {
-            $this->client->copyObject($this->bucket, $this->prefixer->prefixPath($source), $this->bucket, $this->prefixer->prefixPath($destination));
-        } catch (Throwable $exception) {
-            throw UnableToCopyFile::fromLocationTo($source, $destination, $exception);
         }
     }
 
@@ -508,5 +490,36 @@ class AliyunOSSAdapter implements FilesystemAdapter
             ];
         }
         return $result;
+    }
+
+    /**
+     * 移动对象到新位置
+     *
+     * @throws UnableToMoveFile
+     * @throws FilesystemException
+     */
+    public function move(string $source, string $destination, Config $config): void
+    {
+        try {
+            $this->copy($source, $destination, $config);
+            $this->delete($source);
+        } catch (FilesystemOperationFailed $exception) {
+            throw UnableToMoveFile::fromLocationTo($source, $destination, $exception);
+        }
+    }
+
+    /**
+     * 复制对象到新位置
+     *
+     * @throws UnableToCopyFile
+     * @throws FilesystemException
+     */
+    public function copy(string $source, string $destination, Config $config): void
+    {
+        try {
+            $this->client->copyObject($this->bucket, $this->prefixer->prefixPath($source), $this->bucket, $this->prefixer->prefixPath($destination));
+        } catch (Throwable $exception) {
+            throw UnableToCopyFile::fromLocationTo($source, $destination, $exception);
+        }
     }
 }
